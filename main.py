@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 import torch.nn as nn
 from fastapi import FastAPI, File, UploadFile
@@ -65,3 +66,4 @@ async def predict(file: UploadFile = File(...)):
         "prediction": result,
         "class_index": predicted.item()
     }
+
