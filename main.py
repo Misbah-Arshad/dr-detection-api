@@ -1,52 +1,48 @@
-import numpy as np
 import torch
 import torch.nn as nn
+import timm  # Must match training
 from fastapi import FastAPI, File, UploadFile
-from torchvision import transforms, models
+from torchvision import transforms
 from PIL import Image
 import io
-import gc  # Added for memory management
+import gc
 
 # 1. Configuration
 MODEL_PATH = "DR_Backend/swin_best.pth" 
-# FIXED: Added 6th class to match your training (change "Unknown" to your actual 6th label)
-CLASS_NAMES = ["No_DR", "Mild", "Moderate", "Severe", "Proliferative_DR", "Unknown"]
+# DDR Dataset standard labels
+CLASS_NAMES = ["No_DR", "Mild", "Moderate", "Severe", "Proliferative_DR", "Ungradable"]
 
 app = FastAPI()
 
-# 2. Define Model Architecture
+# 2. Define Model Architecture (Matches your training exactly)
 def get_model():
-    # Loading without weights to save initial RAM
-    model = models.swin_t(weights=None) 
-    n_inputs = model.head.in_features
-    # FIXED: Now matches the 6 classes in CLASS_NAMES
-    model.head = nn.Linear(n_inputs, len(CLASS_NAMES))
+    # Use the same model string you used in training (likely 'swin_tiny_patch4_window7_224')
+    # If you aren't sure, 'swin_tiny_patch4_window7_224' is the standard timm tiny swin.
+    model = timm.create_model('swin_tiny_patch4_window7_224', pretrained=False, num_classes=6)
     return model
 
-# 3. Load the Trained Model with Memory Optimization
-device = torch.device("cpu") # Explicitly use CPU for Render Free Tier
+# 3. Load Model
+device = torch.device("cpu")
 model = get_model()
 
 try:
-    # Use weights_only=True if using newer torch versions to save RAM
+    # Use weights_only=True for safety and memory
     state_dict = torch.load(MODEL_PATH, map_location=device)
     model.load_state_dict(state_dict)
     model.eval()
-    # Delete state_dict and clear cache to free up RAM immediately
     del state_dict
-    gc.collect() 
-    print("✅ Model loaded successfully!")
+    gc.collect()
+    print("✅ Model loaded successfully from TIMM architecture!")
 except Exception as e:
     print(f"❌ Error loading model: {e}")
 
-# 4. Image Preprocessing
+# 4. Preprocessing (Matches your val_transform)
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 ])
 
-# 5. API Endpoints
 @app.get("/")
 def home():
     return {"message": "DR Detection API is Running!"}
@@ -57,20 +53,22 @@ async def predict(file: UploadFile = File(...)):
         image_data = await file.read()
         image = Image.open(io.BytesIO(image_data)).convert("RGB")
         
-        # Use inference_mode for maximum memory efficiency
         with torch.inference_mode():
             input_tensor = transform(image).unsqueeze(0).to(device)
             outputs = model(input_tensor)
-            _, predicted = torch.max(outputs, 1)
+            # Apply softmax to see confidence (Optional but helpful)
+            probabilities = torch.nn.functional.softmax(outputs, dim=1)
+            conf, predicted = torch.max(probabilities, 1)
             
         result = CLASS_NAMES[predicted.item()]
-        
-        # Clear temporary tensors from RAM
+        confidence_score = conf.item() * 100
+
         del image_data, image, input_tensor, outputs
         gc.collect()
 
         return {
             "prediction": result,
+            "confidence": f"{confidence_score:.2f}%",
             "class_index": predicted.item()
         }
     except Exception as e:
