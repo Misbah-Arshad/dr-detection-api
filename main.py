@@ -5,33 +5,37 @@ from fastapi import FastAPI, File, UploadFile
 from torchvision import transforms, models
 from PIL import Image
 import io
+import gc  # Added for memory management
 
 # 1. Configuration
-# We updated this path to look inside your subfolder
 MODEL_PATH = "DR_Backend/swin_best.pth" 
-CLASS_NAMES = ["No_DR", "Mild", "Moderate", "Severe", "Proliferative_DR"]
+# FIXED: Added 6th class to match your training (change "Unknown" to your actual 6th label)
+CLASS_NAMES = ["No_DR", "Mild", "Moderate", "Severe", "Proliferative_DR", "Unknown"]
 
 app = FastAPI()
 
-# 2. Define Model Architecture (Swin Transformer)
+# 2. Define Model Architecture
 def get_model():
-    # Loading the base Swin-T architecture
+    # Loading without weights to save initial RAM
     model = models.swin_t(weights=None) 
-    # Adjusting the final head to match your 5 classes
     n_inputs = model.head.in_features
+    # FIXED: Now matches the 6 classes in CLASS_NAMES
     model.head = nn.Linear(n_inputs, len(CLASS_NAMES))
     return model
 
-# 3. Load the Trained Model
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# 3. Load the Trained Model with Memory Optimization
+device = torch.device("cpu") # Explicitly use CPU for Render Free Tier
 model = get_model()
 
 try:
-    # We use map_location=cpu because Render free tier doesn't have a GPU
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
-    model.to(device)
+    # Use weights_only=True if using newer torch versions to save RAM
+    state_dict = torch.load(MODEL_PATH, map_location=device)
+    model.load_state_dict(state_dict)
     model.eval()
-    print("✅ Model loaded successfully from DR_Backend folder!")
+    # Delete state_dict and clear cache to free up RAM immediately
+    del state_dict
+    gc.collect() 
+    print("✅ Model loaded successfully!")
 except Exception as e:
     print(f"❌ Error loading model: {e}")
 
@@ -49,21 +53,25 @@ def home():
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
-    # Read the image sent by the Android app
-    image_data = await file.read()
-    image = Image.open(io.BytesIO(image_data)).convert("RGB")
-    
-    # Preprocess and Run Inference
-    input_tensor = transform(image).unsqueeze(0).to(device)
-    
-    with torch.no_grad():
-        outputs = model(input_tensor)
-        _, predicted = torch.max(outputs, 1)
+    try:
+        image_data = await file.read()
+        image = Image.open(io.BytesIO(image_data)).convert("RGB")
         
-    result = CLASS_NAMES[predicted.item()]
-    
-    return {
-        "prediction": result,
-        "class_index": predicted.item()
-    }
+        # Use inference_mode for maximum memory efficiency
+        with torch.inference_mode():
+            input_tensor = transform(image).unsqueeze(0).to(device)
+            outputs = model(input_tensor)
+            _, predicted = torch.max(outputs, 1)
+            
+        result = CLASS_NAMES[predicted.item()]
+        
+        # Clear temporary tensors from RAM
+        del image_data, image, input_tensor, outputs
+        gc.collect()
 
+        return {
+            "prediction": result,
+            "class_index": predicted.item()
+        }
+    except Exception as e:
+        return {"error": str(e)}
