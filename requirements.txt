@@ -2,6 +2,7 @@
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.2.1
 torchvision==0.17.1
+timm==0.9.16
 fastapi
 uvicorn
 python-multipart
